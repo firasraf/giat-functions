@@ -1,0 +1,61 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "userdriver",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "statusAktif",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "balance",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "userdriver",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "statusAktif",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "id",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "userdriver",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "statusAktif",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "token",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "userdriver",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "statusBuka",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "token",
+          "order": "ASCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
