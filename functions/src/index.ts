@@ -19,6 +19,9 @@ const PATH = '/v1/projects/' + PROJECT_ID + '/messages:send';
 const MESSAGING_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
 const SCOPES = [MESSAGING_SCOPE];
 
+const lat = 0.0144927536231884;
+const lon = 0.0181818181818182;
+
 let db: FirebaseFirestore.Firestore;
 let messaging: admin.messaging.Messaging;
 let initialized = false;
@@ -36,11 +39,11 @@ function getStatusOrderFromNotification(status: String) {
   var statusBody;
   switch (status) {
     case "DRIVER_TERIMA": {
-      statusBody = "Driver Sudah Menerima Pesanan Anda. Menuju Tempat Penjual"
+      statusBody = "Driver Menerima Pesanan Anda. Menuju Penjual"
       break;
     }
     case "MERCHANT_PROSES": {
-      statusBody = "Penjual sudah menerima pesanan"
+      statusBody = "Penjual menerima pesanan"
       break;
     }
     case "DRIVER_AMBIL": {
@@ -48,11 +51,11 @@ function getStatusOrderFromNotification(status: String) {
       break;
     }
     case "DRIVER_ANTAR": {
-      statusBody = "Pesanan Selesai. Menuju ke Destinasi Anda";
+      statusBody = "Makanan Siap. Menuju ke Destinasi Anda";
       break;
     }
     case "DRIVER_SELESAI": {
-      statusBody = "Terima kasih telah bersama GIAT. Enjoy your food!";
+      statusBody = "Terima kasih bersama GIAT. Enjoy your food!";
       break;
     }
     default: {
@@ -76,25 +79,18 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
   const subTotal = snap.get("subTotal");
   const ongkosKirim = snap.get("biayaKirim");
 
-  var quantityTotal;
-
+  var quantityTotal = 0;
   snap.get("pesanan").map(element => {
     functions.logger.info(element);
-    var quantityItem = element['jumlah'] * 1000;
-    var hargaItem = element['hargaMakanan'];
-    quantityTotal = hargaItem - quantityItem;
+    quantityTotal += element['jumlah'] * 1000;
   });
 
-  const merchantFee = subTotal - quantityTotal;
+  const merchantFee = quantityTotal;
   const dividedFee = merchantFee * 0.5;
   functions.logger.info("Divided Fee", dividedFee);
   const driverFee = ongkosKirim * 0.75;
 
   const giatRevenue = (ongkosKirim * 0.25) + dividedFee;
-
-  functions.logger.info("GIAT Revenue Added: ", giatRevenue);
-  functions.logger.info("Merchant Fee Total", merchantFee);
-  functions.logger.info("Driver Total Fee ", driverFee);
 
   const updateInternal = {
     totalDriverFee: representativeInternal.data()['totalDriverFee'] + driverFee,
@@ -110,6 +106,7 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
 
   const update = {
     balance: driverCurrentBalance,
+    onDelivery: false,
   };
   
   await db.runTransaction((transaction) => {
@@ -178,6 +175,9 @@ async function processUpdateOrder(
   });
 }
 
+// async function schedule(snap)
+
+
 async function pushNotificationToDriver(snapDriver: DocumentSnapshot, snap: DocumentSnapshot, context: functions.EventContext) {
 
   const gotToken = snapDriver.get("token");
@@ -221,6 +221,20 @@ async function pushNotificationToDriver(snapDriver: DocumentSnapshot, snap: Docu
   });
 }
 
+async function updateOrderCustomer(snap: DocumentSnapshot, context: functions.EventContext) {
+  const customerOrder = await db.collection('userpengguna').doc(snap.data()["customer_id"]).collection('Order').doc(snap.data()["unique_id"]).get();
+
+    const updatePesanan = {
+      statusPesanan: snap.data()["statusPesanan"],
+    };
+
+    await db.runTransaction((transaction) => {
+      transaction.update(customerOrder.ref,  updatePesanan);
+      // transaction.set(currentPengguna.ref, { lagiPesanan: true });
+      return Promise.resolve();
+    })
+}
+
 async function pushNotificationToCustomer(snap: DocumentSnapshot, context: functions.EventContext) {
     const currentPengguna = await db.collection('userpengguna').doc(snap.data()["customer_id"]).get();
     const customerOrder = await db.collection('userpengguna').doc(snap.data()["customer_id"]).collection('Order').doc(snap.data()["unique_id"]).get();
@@ -228,7 +242,7 @@ async function pushNotificationToCustomer(snap: DocumentSnapshot, context: funct
     const getStatusBody = getStatusOrderFromNotification(snap.data()['statusPesanan']);
 
     const updatePesanan = {
-      statusPesanan: customerOrder.data()['statusPesanan'],
+      statusPesanan: snap.data()["statusPesanan"],
     };
 
     await db.runTransaction((transaction) => {
@@ -262,6 +276,22 @@ async function pushNotificationToCustomer(snap: DocumentSnapshot, context: funct
             ticker: 'false',
           },
         },
+        apns: {
+          payload: {
+            aps: {
+              alert: {
+                title: "GIAT!",
+                body: getStatusBody,
+              },
+              contentAvailable: true,
+            }
+          },
+          headers: {
+            "apns-push-type": "background",
+            "apns-priority": "5",
+            "apns-topic": "com.giatlancar.giat"
+          }
+        }
       };
 
 
@@ -277,6 +307,7 @@ async function pushNotificationToCustomer(snap: DocumentSnapshot, context: funct
       });
 }
 
+export const scheduleSomething = functions.pubsub.schedule("test").onRun
 
 
 export const updateMerchantOrder = functions.region("asia-southeast2").firestore
@@ -284,7 +315,7 @@ export const updateMerchantOrder = functions.region("asia-southeast2").firestore
     .onUpdate(async (snapshot, context) => {
     initialize();
     if (snapshot.after.data()["statusPesanan"] == "MERCHANT_PROSES") {
-        await pushNotificationToCustomer(snapshot.after, context);
+        // await pushNotificationToCustomer(snapshot.after, context);
     } else {
         return;
     }
@@ -305,14 +336,12 @@ enum StatusPesanan {
 async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.EventContext) {
   const currentSender = await db.collection("userpengguna").doc(snap.data()["customer_id"]).get();
 
-  const lat = 0.0144927536231884;
-  const lon = 0.0181818181818182;
+  // Customer Write Order, Provided LatLng..
 
-  const lowerLat = currentSender.get('latitude') - (lat * 2);
-  const lowerLon = currentSender.get('longitude') - (lon * 2);
-
-  const greaterLat = currentSender.get('latitude') + (lat * 2);
-  const greaterLon = currentSender.get('longitude') + (lon * 2);
+  const lowerLat = currentSender.get('latitude') - (lat * 3);
+  const lowerLon = currentSender.get('longitude') - (lon * 3);
+  const greaterLat = currentSender.get('latitude') + (lat * 3);
+  const greaterLon = currentSender.get('longitude') + (lon * 3);
 
   const lesserGeopoint = {
     latitude: lowerLat,
@@ -328,7 +357,7 @@ async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.Even
 
   if (luckyDriver.docs.length == 0) {
     const updatePesanan = {
-      statusPesanan: "TIDAK_ADA_DRIVER UNTUK DELIVERY",
+      statusPesanan: "TIDAK_ADA_DRIVER",
     };
     
     await db.runTransaction((transaction) => {
@@ -337,7 +366,7 @@ async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.Even
       return Promise.resolve();
     })
 
-    functions.logger.info("TIDAK ADA DRIVER UNTUK ORDER : ", snap.id);
+    functions.logger.info("TIDAK ADA DRIVER UNTUK ORDER DELIVERY: ", snap.id);
     return;
   }
 
@@ -387,48 +416,13 @@ async function findDriver(snap: DocumentSnapshot, context: functions.EventContex
   const lat = 0.0144927536231884;
   const lon = 0.0181818181818182;
 
-  const lowerLat = currentMerchant.get('latitude') - (lat * 2);
-  const lowerLon = currentMerchant.get('longitude') - (lon * 2);
-
-  const greaterLat = currentMerchant.get('latitude') + (lat * 2);
-  const greaterLon = currentMerchant.get('longitude') + (lon * 2);
-
-  const lesserGeopoint = {
-    latitude: lowerLat,
-    longitude: lowerLon,
-  }
-
-  const greaterGeopoint = {
-    latitude: greaterLat,
-    longitude: greaterLon,
-  }
-
-  const luckyDriver = await db.collection("userdriver").where("statusAktif", "==", true).where("pinLocation", ">=", lesserGeopoint).where("pinLocation", "<=", greaterGeopoint).get();
-
-  if (luckyDriver.docs.length == 0) {
-    const updatePesanan = {
-      statusPesanan: "TIDAK_ADA_DRIVER",
-    };
-    
-    await db.runTransaction((transaction) => {
-      transaction.update(snap.ref, updatePesanan);
-      // transaction.set(currentPengguna.ref, { lagiPesanan: true });
-      return Promise.resolve();
-    })
-
-    functions.logger.info("TIDAK ADA DRIVER UNTUK ORDER : ", snap.id);
-    return;
-  }
-
-  // const distance = calculateDistance(snapshot.after.data()["latitude"], snapshot.after.data()["longitude"], currentMerchant.data()["latitude"], currentMerchant.data()["longitude"], "K");
-
   const createOrderForDriver = {
     resto_id: snap.get('resto_id'),
     nama_resto: snap.get('nama_resto'),
     alamat_resto: snap.get('alamat_resto'),
     customer_id: snap.get('customer_id'),
     unique_id: context.params.orderID,
-    biayaKirim: 3000,
+    biayaKirim: snap.get('biayaKirim'),
     subTotal: snap.get('subTotal'),
     totalHarga: snap.get('totalHarga'),
     metodePembayaran: "CASH",
@@ -442,67 +436,155 @@ async function findDriver(snap: DocumentSnapshot, context: functions.EventContex
     jarak: 1,
   }
 
-  const updatePesanan = {
-    jarak: 1,
-    statusPesanan: "TERDAFTAR",
-    namaDriver: luckyDriver.docs[0].get('namaDriver'),
-    driverId: luckyDriver.docs[0].id,
-    nomor_driver: luckyDriver.docs[0].get('noTelfon'),
-  };
+  if (currentMerchant.get('latitude') == null && currentMerchant.get('longitude') == null) {
+    functions.logger.error("MERCHANT TIDAK ADA DATA LAT AND LONG")    
+    const luckyDriver2 = await db.collection("userdriver").where("statusAktif", "==", true).where("balance", ">=", snap.data()["subTotal"]).get();
 
-  const createOrderForMerchant = {
-    pesanan: snap.get('pesanan'),
-    resto_id: snap.get('resto_id'),
-    nama_resto: snap.get('nama_resto'),
-    alamat_resto: snap.get('alamat_resto'),
-    customer_id: snap.get('customer_id'),
-    unique_id: context.params.orderID,
-    biayaKirim: 3000,
-    totalHarga: snap.get('totalHarga'),
-    metodePembayaran: "CASH",
-    terkonfirmasi: true,
-    namaLengkap: snap.get('alamatRumah'),
-    alamatRumah: snap.get('namaLengkap') ?? '',
-    createdAt: snap.get('createdAt'),
-    updatedAt: snap.get('updatedAt'),
-    subTotal: snap.get('subTotal'),
-    ongkosKirim: 3000,
-    statusPesanan: "TERDAFTAR",
-    namaDriver: luckyDriver.docs[0].get('namaDriver'),
-    driverId: luckyDriver.docs[0].id,
-    nomor_driver: luckyDriver.docs[0].get('noTelfon'),
-  }
-
-  let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver.docs[0].id).collection('Order');
-  orderLuckyDriver.add(createOrderForDriver).then(references => {
-    functions.logger.info("DRIVER DAPAT ORDER: ", references.id)
-  })
-
-  let orderLuckyMerchant = currentMerchant.ref.collection('Order');
-  orderLuckyMerchant.add(createOrderForMerchant).then(references => {
-    functions.logger.info("MERCHANT DAPAT ORDER: ", references.id);
-  })
-
-  /*
-  currentMerchant.ref.collection('Order').add(snap.data()).then((value) => {
-    functions.logger.info("MERCHANT DAPAT ORDER: ", value.id);
-    return Promise.resolve();
-  });
-  luckyDriver.docs[0].ref.collection('Order').add(createOrderForDriver).then((value) => {
-    if (value.id) {
+    if (luckyDriver2.docs.length == 0) {
+      const updatePesanan = {
+        statusPesanan: "TIDAK_ADA_DRIVER",
+      };
       
+      await db.runTransaction((transaction) => {
+        transaction.update(snap.ref, updatePesanan);
+        return Promise.resolve();
+      })
+  
+      functions.logger.info("DRIVER TIDAK ADA YANG AKTIF UNTUK ORDER: ", snap.id);
+      return;
     }
-    functions.logger.info("DRIVER DAPAT ORDER: ", value.id)
-    return Promise.resolve();
-  });
-  */
 
-  await db.runTransaction((transaction) => {
-    transaction.update(snap.ref, updatePesanan);
+    functions.logger.info("Coba Coba panggil Alternatif Driver: ", luckyDriver2.docs[0].get('namaDriver'))
+  
+    const createOrderForMerchant = {
+      pesanan: snap.get('pesanan'),
+      resto_id: snap.get('resto_id'),
+      nama_resto: snap.get('nama_resto'),
+      alamat_resto: snap.get('alamat_resto'),
+      customer_id: snap.get('customer_id'),
+      unique_id: context.params.orderID,
+      biayaKirim: snap.get('biayaKirim'),
+      totalHarga: snap.get('totalHarga'),
+      metodePembayaran: "CASH",
+      terkonfirmasi: true,
+      namaLengkap: snap.get('alamatRumah'),
+      alamatRumah: snap.get('namaLengkap') ?? '',
+      createdAt: snap.get('createdAt'),
+      updatedAt: snap.get('updatedAt'),
+      subTotal: snap.get('subTotal'),
+      ongkosKirim: 3000,
+      statusPesanan: "TERDAFTAR",
+      namaDriver: luckyDriver2.docs[0].get('namaDriver'),
+      driverId: luckyDriver2.docs[0].id,
+      nomor_driver: luckyDriver2.docs[0].get('noTelfon'),
+    }
+
+    const updatePesananAlternative = {
+      jarak: 1,
+      statusPesanan: "TERDAFTAR",
+      namaDriver: luckyDriver2.docs[0].get('namaDriver'),
+      driverId: luckyDriver2.docs[0].id,
+      nomor_driver: luckyDriver2.docs[0].get('noTelfon'),
+    };
+
+    let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver2.docs[0].id).collection('Order');
+    orderLuckyDriver.add(createOrderForDriver).then(references => {
+      functions.logger.info("DRIVER Alternative DAPAT ORDER: ", references.id)
+    })
+
+    let orderLuckyMerchant = currentMerchant.ref.collection('Order');
+    orderLuckyMerchant.add(createOrderForMerchant).then(references => {
+      functions.logger.info("MERCHANT DAPAT ORDER: ", references.id);
+    })
+
+    await db.runTransaction((transaction) => {
+      transaction.update(snap.ref, updatePesananAlternative);
+      return Promise.resolve();
+    })
+  } else {
+    
+    const lowerLat = currentMerchant.get('latitude') - (lat * 5);
+    const lowerLon = currentMerchant.get('longitude') - (lon * 5);
+
+    const greaterLat = currentMerchant.get('latitude') + (lat * 5);
+    const greaterLon = currentMerchant.get('longitude') + (lon * 5);
+
+    const lesserGeopoint = {
+      latitude: lowerLat,
+      longitude: lowerLon,
+    }
+
+    const greaterGeopoint = {
+      latitude: greaterLat,
+      longitude: greaterLon,
+    }
+
+    const luckyDriver = await db.collection("userdriver").where("statusAktif", "==", true)
+      .where("pinLocation", ">=", lesserGeopoint)
+      .where("pinLocation", "<=", greaterGeopoint).where("onDelivery", "==", false).get();
+
+      if (luckyDriver.docs.length == 0) {
+          const updatePesanan = {
+          statusPesanan: "TIDAK_ADA_DRIVER",
+      };
+    
+      await db.runTransaction((transaction) => {
+        transaction.update(snap.ref, updatePesanan);
+        return Promise.resolve();
+      })
+
+      functions.logger.info("TIDAK ADA DRIVER DI JANGKAUAN MERCHANT UNTUK ORDER : ", snap.id);
+      return;
+    }
+
+    const updatePesanan = {
+      jarak: 1,
+      statusPesanan: "TERDAFTAR",
+      namaDriver: luckyDriver.docs[0].get('namaDriver'),
+      driverId: luckyDriver.docs[0].id,
+      nomor_driver: luckyDriver.docs[0].get('noTelfon'),
+    };
+
+    const createOrderForMerchant = {
+      pesanan: snap.get('pesanan'),
+      resto_id: snap.get('resto_id'),
+      nama_resto: snap.get('nama_resto'),
+      alamat_resto: snap.get('alamat_resto'),
+      customer_id: snap.get('customer_id'),
+      unique_id: context.params.orderID,
+      biayaKirim: snap.get('biayaKirim'),
+      totalHarga: snap.get('totalHarga'),
+      metodePembayaran: "CASH",
+      terkonfirmasi: true,
+      namaLengkap: snap.get('alamatRumah'),
+      alamatRumah: snap.get('namaLengkap') ?? '',
+      createdAt: snap.get('createdAt'),
+      updatedAt: snap.get('updatedAt'),
+      subTotal: snap.get('subTotal'),
+      ongkosKirim: 3000,
+      statusPesanan: "TERDAFTAR",
+      namaDriver: luckyDriver.docs[0].get('namaDriver'),
+      driverId: luckyDriver.docs[0].id,
+      nomor_driver: luckyDriver.docs[0].get('noTelfon'),
+    }
+
+    let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver.docs[0].id).collection('Order');
+    orderLuckyDriver.add(createOrderForDriver).then(references => {
+      functions.logger.info("DRIVER DAPAT ORDER: ", references.id)
+    })
+
+    let orderLuckyMerchant = currentMerchant.ref.collection('Order');
+    orderLuckyMerchant.add(createOrderForMerchant).then(references => {
+      functions.logger.info("MERCHANT DAPAT ORDER: ", references.id);
+    })
+
+    await db.runTransaction((transaction) => {
+      transaction.update(snap.ref, updatePesanan);
     // transaction.set(luckyDriver.docs[0].ref, createOrderForDriver);
-    return Promise.resolve();
-  })
+      return Promise.resolve();
+    })
 
+  }
 }
 
 export const customerWriteDeliveryOrder = functions.region("asia-southeast2").firestore.document("/userpengguna/{userID}/OrderAntar/{orderID}").onCreate(async (snapshot, context) => {
@@ -520,9 +602,12 @@ export const customerWriteOrder = functions.region("asia-southeast2").firestore.
   functions.logger.info("Ada Order Masuk dari Customer: ", snapshot.data()["namaLengkap"]);
 
   await findDriver(snapshot, context);
+  
 
   // await pushNotificationToCustomer(snapshot.after, context);
 })
+
+export const findDumbedOrderAndMoving = function.
 
 export const orderNotFoundDriver = functions.region("asia-southeast2").firestore.document("/userpengguna/{userID}/Order/{orderID}").onUpdate(async (snapshot, context) => {
   initialize();
@@ -535,6 +620,31 @@ export const orderNotFoundDriver = functions.region("asia-southeast2").firestore
 })
 
 export const driverGotOrder = functions.region("asia-southeast2").firestore.document("/userdriver/{userID}/Order/{orderID}").onCreate(async (snapshot, context) => {
+  initialize();
+  const currentDriver = await db
+    .collection("userdriver")
+    .doc(context.params.userID)
+    .get();
+
+    const updateDriverStatus = {
+      onDelivery: true,
+    };
+
+    if (snapshot.data()['statusPesanan'] == 'TERDAFTAR') {
+      functions.logger.info("Order Masuk Untuk Driver: ", snapshot.data());
+      functions.logger.info("Order Masuk Untuk Driver Bernama: ", currentDriver.data()["namaDriver"]);
+
+      await db.runTransaction((transaction) => {
+        transaction.update(currentDriver.ref, updateDriverStatus);
+      // transaction.set(luckyDriver.docs[0].ref, createOrderForDriver);
+        return Promise.resolve();
+      })
+
+      await pushNotificationToDriver(currentDriver, snapshot, context);
+    }
+})
+
+export const driverDeliveryANTARGotOrder = functions.region("asia-southeast2").firestore.document("/userdriver/{userID}/OrderAntar/{orderID}").onCreate(async (snapshot, context) => {
   initialize();
   const currentDriver = await db
     .collection("userdriver")
@@ -571,17 +681,48 @@ export const updateTestFeeOrder = functions.region("asia-southeast2").firestore
   if (snapshot.after.data()["statusPesanan"] == "DRIVER_SELESAI") {
     functions.logger.info("DRIVER BENAR2 SELESAI");
     await processFeeUpdateOrder(context.params.driverId, snapshot.after);
+    // await pushNotificationToCustomer(snapshot.after, context);
+    await updateOrderCustomer(snapshot.after, context);
+  } else if (snapshot.after.data()["statusPesanan"] == "DRIVER_ANTAR") {
     await pushNotificationToCustomer(snapshot.after, context);
-  } else {
+  } else if (snapshot.after.data()["statusPesanan"] == "DRIVER_TERIMA") {
+    await pushNotificationToCustomer(snapshot.after, context);
     functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
-    await pushNotificationToCustomer(snapshot.after, context);
+  } else {
+    await updateOrderCustomer(snapshot.after, context);
+    functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
   }
 });
 
-export const updateOrder = functions.region("asia-southeast2").firestore
+export const driverUpdateOrder = functions.region("asia-southeast2").firestore
   .document("/userdriver/{driverId}/Order/{orderId}")
   .onUpdate(async (snapshot, context) => {
     initialize();
+    const currentDriver = await db
+    .collection("userdriver")
+    .doc(context.params.driverId)
+    .get();
+
+    const updateDriverStatus = {
+      onDelivery: true,
+    };
+
+    if (snapshot.after.data()["statusPesanan"] == "DRIVER_AMBIL") {
+      await db.runTransaction((transaction) => {
+        transaction.update(currentDriver.ref, updateDriverStatus);
+        return Promise.resolve();
+      })
+    } else if (snapshot.after.data()["statusPesanan"] == "DRIVER_TERIMA") {
+      await db.runTransaction((transaction) => {
+        transaction.update(currentDriver.ref, updateDriverStatus);
+        return Promise.resolve();
+      })
+    } else if (snapshot.after.data()["statusPesanan"] == "DRIVER_ANTAR") {
+      await db.runTransaction((transaction) => {
+        transaction.update(currentDriver.ref, updateDriverStatus);
+        return Promise.resolve();
+      })
+    }
 
     /*
     switch (snapshot.after.data["statusPesanan"]) {
@@ -621,25 +762,7 @@ export const updateOrder = functions.region("asia-southeast2").firestore
     }
     */
 
-    if (snapshot.after.data()["statusPesanan"] == "DRIVER_SELESAI") {
-        functions.logger.info("DRIVER BENAR2 SELESAI");
-      await processUpdateOrder(context.params.driverId, snapshot.after, context);
-      await pushNotificationToCustomer(snapshot.after, context);
-    } else {
-      functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
-      await pushNotificationToCustomer(snapshot.after, context);
-    }
-  });
-
-
-export const useWildCart = functions.firestore
-  .document('users/{userId}')
-  .onWrite((change, context) => {
-    // If we set `/users/marie` to {name: "Marie"} then
-
-    // ... and ...
-    // change.after.data() == {name: "Marie"}
-  });
+});
 
 export const testFCMOrderBoard = functions.region('asia-southeast2').https.onRequest(
   (request, response) => {
