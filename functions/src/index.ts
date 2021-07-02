@@ -88,7 +88,7 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
   const merchantFee = quantityTotal;
   const dividedFee = merchantFee * 0.5;
   functions.logger.info("Divided Fee", dividedFee);
-  const driverFee = ongkosKirim * 0.75;
+  const driverFee = ongkosKirim * 0.25;
 
   const giatRevenue = (ongkosKirim * 0.25) + dividedFee;
 
@@ -555,6 +555,8 @@ async function findDriver(snap: DocumentSnapshot, context: functions.EventContex
       return;
     }
 
+    functions.logger.info("ADA BERAPA DRIVER AVAILABLE : ", luckyDriver.docs.length);
+
     const updatePesanan = {
       jarak: 1,
       statusPesanan: "TERDAFTAR",
@@ -589,12 +591,12 @@ async function findDriver(snap: DocumentSnapshot, context: functions.EventContex
     if (luckyDriver.docs[0].get('balance') <= 0) {
       let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver.docs[1].id).collection('Order');
       orderLuckyDriver.add(createOrderForDriver).then(references => {
-        functions.logger.info("DRIVER DAPAT ORDER: ", references.id)
+        functions.logger.info("DRIVER #1 DAPAT ORDER: ", references.id)
       })
     } else {
       let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver.docs[0].id).collection('Order');
       orderLuckyDriver.add(createOrderForDriver).then(references => {
-        functions.logger.info("DRIVER DAPAT ORDER: ", references.id)
+        functions.logger.info("DRIVER #4 DAPAT ORDER: ", references.id)
       })
     }
 
