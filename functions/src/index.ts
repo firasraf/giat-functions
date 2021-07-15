@@ -4,6 +4,13 @@ import { DocumentSnapshot, snapshotConstructor } from "firebase-functions/lib/pr
 import { eventarc_v1, google } from 'googleapis';
 import https from 'https';
 import { docs } from "googleapis/build/src/apis/docs";
+import { spawn } from "child-process-promise";
+import { Storage } from "@google-cloud/storage";
+import fs from 'fs';
+import mkdirp from 'mkdirp';
+
+import os from 'os';
+import path from 'path';
 
 // // Start writing Firebase Functions
 // // https://firebase.google.com/docs/functions/typescript
@@ -24,13 +31,18 @@ const lon = 0.0181818181818182;
 
 let db: FirebaseFirestore.Firestore;
 let messaging: admin.messaging.Messaging;
+let storage: admin.storage.Storage;
 let initialized = false;
+
+// let gcpStorage: Storage;
+
 
 function initialize() {
   if (initialized === true) return;
   initialized = true;
   admin.initializeApp();
   messaging = admin.messaging();
+  storage = admin.storage();
   db = admin.firestore();
 }
 
@@ -65,6 +77,48 @@ function getStatusOrderFromNotification(status: String) {
   return statusBody;
 }
 
+async function processDeliveryFeeOrder(driverId: string, snap: DocumentSnapshot) {
+  const currentDriver = await db
+    .collection("userdriver")
+    .doc(driverId)
+    .get();
+
+  const representativeInternal = await db.collection("giatrepresentative").doc('quD2wq4uH22ZrzdnJCrr').get();
+
+  const currentBalance = currentDriver.get("balance");
+
+  const ongkosKirim = snap.get("ongkosKirim");
+
+  const driverFee = ongkosKirim * 0.25;
+
+  const driverCurrentBalance = (currentBalance - driverFee | 0);
+  functions.logger.info("Driver BALANCE FOR NOW: ", driverCurrentBalance);
+
+  const updateInternal = {
+    totalDriverFee: representativeInternal.data()['totalDriverFee'] + driverFee,
+    grossRevenue: representativeInternal.data()['grossRevenue'] + ongkosKirim,
+    transactions: representativeInternal.data()['transactions'] + 1,
+    giatRevenue: representativeInternal.data()['giatRevenue'] + driverFee,
+  }
+
+  const update = {
+    balance: driverCurrentBalance,
+    onDelivery: false,
+  };
+
+  await db.runTransaction((transaction) => {
+    transaction.update(currentDriver.ref, update);
+    functions.logger.info("BALANCE CUTTING FOR DRIVER ", driverFee);
+    return Promise.resolve();
+  });
+
+  await db.runTransaction((transaction) => {
+    transaction.update(representativeInternal.ref, updateInternal);
+    functions.logger.info("UPDATE REVENUE INTERNAL ");
+    return Promise.resolve();
+  });
+}
+
 async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
 
   const currentDriver = await db
@@ -72,7 +126,7 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
     .doc(driverId)
     .get();
 
-  const representativeInternal = await db.collection("giatrepresentative").doc('Fdn55g42wzLreqb43aV9').get();
+  const representativeInternal = await db.collection("giatrepresentative").doc('quD2wq4uH22ZrzdnJCrr').get();
 
   const currentBalance = currentDriver.get("balance");
 
@@ -95,7 +149,7 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
   const updateInternal = {
     totalDriverFee: representativeInternal.data()['totalDriverFee'] + driverFee,
     totalMerchantFee: representativeInternal.data()['totalMerchantFee'] + dividedFee,
-    transactionalRevenue: representativeInternal.data()['transactionalRevenue'] + (subTotal + ongkosKirim),
+    grossRevenue: representativeInternal.data()['grossRevenue'] + (subTotal + ongkosKirim),
     transactions: representativeInternal.data()['transactions'] + 1,
     giatRevenue: representativeInternal.data()['giatRevenue'] + giatRevenue,
   }
@@ -120,6 +174,79 @@ async function processFeeUpdateOrder(driverId: string, snap: DocumentSnapshot) {
     functions.logger.info("UPDATE REVENUE INTERNAL ");
     return Promise.resolve();
   });
+}
+
+const THUMB_MAX_HEIGHT = 600;
+const THUMB_MAX_WIDTH = 600;
+
+
+async function checkExceededFiles() {
+  const restoBucket = await storage.bucket();
+  const customIntercept = {
+    request: function(reqOpts) {
+        reqOpts.forever = false;
+        return reqOpts
+    }
+  }
+  restoBucket.interceptors.push(customIntercept);
+
+  const restoDirs = await restoBucket.getFiles({
+    directory: "imagesResto"
+  });
+
+  restoDirs[0].map(async (file) => {
+    const filePath = file.name;
+    const fileBucket = file.bucket;
+    const metadataSize = file.metadata;
+
+    if (metadataSize.size > 1000000) {
+      const fileName = path.basename(filePath);
+      const newContentType = file.metadata.contentType;
+
+      // const bucket = admin.storage().bucket(fileBucket.name);
+      const tempPathFile = path.join(os.tmpdir(), fileName);
+      functions.logger.log('Temp Path File Size', metadataSize.size);
+
+      await restoBucket.file(filePath).download({destination: tempPathFile});
+      functions.logger.log('Image downloaded locally to', tempPathFile);
+      // Generate a thumbnail using ImageMagick.
+      await spawn('convert', [tempPathFile, '-thumbnail', '600x600>', tempPathFile]);
+      functions.logger.log('Thumbnail created at', tempPathFile);
+      // We add a 'thumb_' prefix to thumbnails file name. That's where we'll upload the thumbnail.
+      const thumbFileName = `thumb_${fileName}`;
+      const thumbFilePath = path.join(path.dirname(filePath), thumbFileName);
+      // Uploading the thumbnail.
+      await restoBucket.upload(tempPathFile, {
+        destination: thumbFilePath,
+        contentType: newContentType
+      });
+      
+      const thumbFile = restoBucket.file(thumbFileName);
+      const results = await Promise.all([
+        thumbFile.getSignedUrl({
+          action: 'read',
+          expires: '03-01-2500',
+        }),
+      ]);
+
+      return functions.logger.log('Thumbnail created at', results[0]);
+      
+      /*
+      const selectedMerchant = await db.collection('usersresto').doc(fileName).get();
+
+      const updateProfil = {
+        fotoprofilURL: results[0]
+      }
+
+      await db.runTransaction((transaction) => {
+        transaction.update(selectedMerchant.ref, updateProfil);
+        return Promise.resolve();
+      });
+      */
+      
+    }
+
+  })
 }
 
 async function processUpdateOrder(
@@ -176,6 +303,48 @@ async function processUpdateOrder(
 }
 
 // async function schedule(snap)
+
+async function pushNotificationDeliveryToDriver(snapDriver: DocumentSnapshot, snap: DocumentSnapshot, context: functions.EventContext) {
+
+  const gotToken = snapDriver.get("token");
+
+  const testingPayload = {
+    token: gotToken,
+    data: {
+      via: "GIAT Antar FCM",
+      deliveryID: snap.id,
+      customer_id: snap.data()["customer_id"],
+      type_key: "ORDER_ONBOARDING",
+      order_type: "ORDER_DELIVERY",
+      count: "1",
+    },
+    notification: {
+      title: 'GIAT Driver!',
+      body: 'Ada Pesanan Siap Driver!',
+    },
+    android: {
+      priority: "high" as const,
+      ttl: 0,
+      notification: {
+        priority: "high" as const,
+        visibility: "public" as const,
+        clickAction: 'android.intent.action.MAIN',
+        ticker: 'false',
+      },
+    },
+  };
+
+  messaging
+  .send(testingPayload)
+  .then((responsePayload) => {
+    // Response is a message ID string.
+    functions.logger.info("Successfully sent message:", responsePayload);
+    // console.log('Successfully sent message:', response);
+  })
+  .catch((error) => {
+    console.log("Error sending message:", error);
+  });
+}
 
 
 async function pushNotificationToDriver(snapDriver: DocumentSnapshot, snap: DocumentSnapshot, context: functions.EventContext) {
@@ -307,8 +476,6 @@ async function pushNotificationToCustomer(snap: DocumentSnapshot, context: funct
       });
 }
 
-export const scheduleSomething = functions.pubsub.schedule("test").onRun
-
 
 export const updateMerchantOrder = functions.region("asia-southeast2").firestore
     .document("/usersresto/{restoId}/Order/{orderId}")
@@ -338,10 +505,10 @@ async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.Even
 
   // Customer Write Order, Provided LatLng..
 
-  const lowerLat = currentSender.get('latitude') - (lat * 3);
-  const lowerLon = currentSender.get('longitude') - (lon * 3);
-  const greaterLat = currentSender.get('latitude') + (lat * 3);
-  const greaterLon = currentSender.get('longitude') + (lon * 3);
+  const lowerLat = currentSender.get('latitude') - (lat * 2);
+  const lowerLon = currentSender.get('longitude') - (lon * 2);
+  const greaterLat = currentSender.get('latitude') + (lat * 2);
+  const greaterLon = currentSender.get('longitude') + (lon * 2);
 
   const lesserGeopoint = {
     latitude: lowerLat,
@@ -377,8 +544,12 @@ async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.Even
     catatan: snap.get('catatan'),
     asalAlamat: snap.get('asalAlamat'),
     asalNama: snap.get('asalNama'),
+    asalFormatted: snap.get('asalFormatted'),
+    asalNote: snap.get('asalNote'),
     tujuanAlamat: snap.get('tujuanAlamat'),
     tujuanNama: snap.get('tujuanNama'),
+    tujuanNote: snap.get('tujuanNote'),
+    tujuanFormatted: snap.get('tujuanFormatted'),
     ongkosKirim: snap.get('ongkosKirim'),
     totalHarga: snap.get('totalHarga'),
     metodePembayaran: "CASH",
@@ -386,7 +557,9 @@ async function findDeliveryOrder(snap: DocumentSnapshot, context: functions.Even
     createdAt: snap.get('createdAt'),
     updatedAt: snap.get('updatedAt'),
     statusPesanan: "TERDAFTAR",
-    jarak: 1,
+    originPos: snap.get("originPos"),
+    destPos: snap.get("destPos"),
+    jarak: snap.get("jarak"),
   }
 
   let orderLuckyDriver = db.collection('userdriver').doc(luckyDriver.docs[0].id).collection('OrderAntar');
@@ -614,6 +787,47 @@ async function findDriver(snap: DocumentSnapshot, context: functions.EventContex
   }
 }
 
+export const generateMerchantThumbnail = functions.region("asia-southeast2").storage.object().onFinalize(async (object) => {
+  const fileBucket = object.bucket; // The Storage bucket that contains the file.
+  const filePath = object.name; // File path in the bucket.
+  const contentType = object.contentType; // File content type.
+  const metageneration = object.metageneration; // 
+
+  // [START stopConditions]
+  // Exit if this is triggered on a file that is not an image.
+  if (!contentType.startsWith('image/')) {
+    return functions.logger.log('This is not an image.');
+  }
+
+  // Get the file name.
+  const fileName = path.basename(filePath);
+  // Exit if the image is already a thumbnail.
+  if (fileName.startsWith('thumb_')) {
+    return functions.logger.log('Already a Thumbnail.');
+  }
+
+  const bucket = admin.storage().bucket(fileBucket);
+  const tempFilePath = path.join(os.tmpdir(), fileName);
+  const metadata = {
+    contentType: contentType,
+  };
+  await bucket.file(filePath).download({destination: tempFilePath});
+  functions.logger.log('Image downloaded locally to', tempFilePath);
+  // Generate a thumbnail using ImageMagick.
+  await spawn('convert', [tempFilePath, '-thumbnail', '600x600>', tempFilePath]);
+  functions.logger.log('Thumbnail created at', tempFilePath);
+  // We add a 'thumb_' prefix to thumbnails file name. That's where we'll upload the thumbnail.
+  const thumbFileName = `thumb_${fileName}`;
+  const thumbFilePath = path.join(path.dirname(filePath), thumbFileName);
+  // Uploading the thumbnail.
+  await bucket.upload(tempFilePath, {
+    destination: thumbFilePath,
+    metadata: metadata,
+  });
+
+  return fs.unlinkSync(tempFilePath);
+})
+
 export const customerWriteDeliveryOrder = functions.region("asia-southeast2").firestore.document("/userpengguna/{userID}/OrderAntar/{orderID}").onCreate(async (snapshot, context) => {
   initialize();
   functions.logger.info("Ada Order Masuk Untuk Delivery: ", snapshot.data());
@@ -678,11 +892,22 @@ export const driverDeliveryANTARGotOrder = functions.region("asia-southeast2").f
     .doc(context.params.userID)
     .get();
 
+    const updateDriverStatus = {
+      onDelivery: true,
+    };
+
     if (snapshot.data()['statusPesanan'] == 'TERDAFTAR') {
       functions.logger.info("Order Masuk Untuk Driver: ", snapshot.data());
       functions.logger.info("Order Masuk Untuk Driver Bernama: ", currentDriver.data()["namaDriver"]);
 
-      await pushNotificationToDriver(currentDriver, snapshot, context);
+      await db.runTransaction((transaction) => {
+        transaction.update(currentDriver.ref, updateDriverStatus);
+      // transaction.set(luckyDriver.docs[0].ref, createOrderForDriver);
+        return Promise.resolve();
+      })
+
+      // await pushNotificationToDriver(currentDriver, snapshot, context);
+      await pushNotificationDeliveryToDriver(currentDriver, snapshot, context);
     }
 })
 
@@ -712,7 +937,7 @@ export const updateTestFeeOrder = functions.region("asia-southeast2").firestore
 .onUpdate(async (snapshot, context) => {
   initialize();
   if (snapshot.after.data()["statusPesanan"] == "DRIVER_SELESAI") {
-    functions.logger.info("DRIVER BENAR2 SELESAI");
+    // functions.logger.info("DRIVER BENAR2 SELESAI");
     await processFeeUpdateOrder(context.params.driverId, snapshot.after);
     // await pushNotificationToCustomer(snapshot.after, context);
     await updateOrderCustomer(snapshot.after, context);
@@ -721,10 +946,17 @@ export const updateTestFeeOrder = functions.region("asia-southeast2").firestore
     await pushNotificationToCustomer(snapshot.after, context);
   } else if (snapshot.after.data()["statusPesanan"] == "DRIVER_TERIMA") {
     await pushNotificationToCustomer(snapshot.after, context);
-    functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
+    // functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
   } else {
     await updateOrderCustomer(snapshot.after, context);
-    functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
+    // functions.logger.info("DRIVER STATUS: ", snapshot.after.data()["statusPesanan"]);
+  }
+});
+
+export const updateDeliveryFeeOrder = functions.region("asia-southeast2").firestore.document("/userdriver/{driverId}/OrderAntar/{orderId}").onUpdate(async (snapshot, context) => { 
+  initialize();
+  if (snapshot.after.data()["statusPesanan"] == "DRIVER_SELESAI") {
+    await processDeliveryFeeOrder(context.params.driverId, snapshot.after);
   }
 });
 
@@ -809,13 +1041,10 @@ export const driverUpdateOrder = functions.region("asia-southeast2").firestore
 
 });
 
-export const scheduledFunction = functions.pubsub.schedule('every 5 minutes').onRun((context) => {
-  console.log('This will be run every 5 minutes!');
-  
-  // const currentMerchant = await db.collection("usersresto").get();
-  
+export const scheduledMerchantStorage = functions.region("asia-southeast2").pubsub.schedule('every 5 minutes').onRun( async (context) => {
+  initialize();
 
-  return null;
+  await checkExceededFiles();
 });
 
 export const testFCMOrderBoard = functions.region('asia-southeast2').https.onRequest(
