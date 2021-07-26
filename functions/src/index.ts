@@ -404,6 +404,113 @@ async function updateOrderCustomer(snap: DocumentSnapshot, context: functions.Ev
     })
 }
 
+async function pushMessageToDriver(snap: DocumentSnapshot, context: functions.EventContext) {
+  const currentPengguna = await db.collection('userdriver').doc(snap.data()["idDriver"]).get();
+  const gotToken = currentPengguna.get("token");
+
+  /*
+  const createFirstMessageForDriver = {
+    'idCustomer': snap.get('idCustomer'),
+    'idDriver': snap.get('idDriver'),
+    'orderId': snap.get('orderId'),
+    'timestamp': snap.get('timestamp'),
+    'content': snap.get('content'),
+    'type': snap.get('type')
+  };
+  */
+
+  const testingPayload = {
+      token: gotToken,
+      data: {
+        orderID: snap.get('orderId'),
+        customer_id: snap.data()["idCustomer"],
+        driver_id: snap.data()["idDriver"],
+        content: snap.data()["content"],
+        timestampId: snap.data()['timestamp'],
+        type_key: "MESSAGE_ONBOARDING",
+        order_type: "MESSAGE",
+      },
+      notification: {
+        title: "GIAT Driver",
+        body: snap.get('content'),
+      },
+      android: {
+        priority: "high" as const,
+        ttl: 0,
+        notification: {
+          priority: "high" as const,
+          visibility: "public" as const,
+          clickAction: 'android.intent.action.MAIN',
+          ticker: 'false',
+        },
+      },
+    };
+
+    messaging
+    .send(testingPayload)
+    .then((responsePayload) => {
+      // Response is a message ID string.
+      functions.logger.info("Successfully sent message:", responsePayload);
+    })
+    .catch((error) => {
+      console.log("Error sending message:", error);
+    });
+}
+
+async function pushMessageToCustomer(snap: DocumentSnapshot, context: functions.EventContext) {
+  const currentPengguna = await db.collection('userpengguna').doc(snap.data()["idCustomer"]).get();
+  const gotToken = currentPengguna.get("token");
+
+  /*
+  const createFirstMessageForDriver = {
+    'idCustomer': snap.get('idCustomer'),
+    'idDriver': snap.get('idDriver'),
+    'orderId': snap.get('orderId'),
+    'timestamp': snap.get('timestamp'),
+    'content': snap.get('content'),
+    'type': snap.get('type')
+  };
+  */
+
+  const testingPayload = {
+      token: gotToken,
+      data: {
+        orderID: snap.get('orderId'),
+        customer_id: snap.data()["idCustomer"],
+        driver_id: snap.data()["idDriver"],
+        content: snap.data()["content"],
+        timestampId: snap.data()['timestamp'],
+        type_key: "MESSAGE_ONBOARDING",
+        order_type: "MESSAGE",
+      },
+      notification: {
+        title: "GIAT Pelanggan",
+        body: snap.get('content'),
+      },
+      android: {
+        priority: "high" as const,
+        ttl: 0,
+        notification: {
+          priority: "high" as const,
+          visibility: "public" as const,
+          clickAction: 'android.intent.action.MAIN',
+          ticker: 'false',
+        },
+      },
+    };
+
+    messaging
+    .send(testingPayload)
+    .then((responsePayload) => {
+      // Response is a message ID string.
+      functions.logger.info("Successfully sent message:", responsePayload);
+    })
+    .catch((error) => {
+      console.log("Error sending message:", error);
+    });
+}
+
+
 async function pushNotificationToCustomer(snap: DocumentSnapshot, context: functions.EventContext) {
     const currentPengguna = await db.collection('userpengguna').doc(snap.data()["customer_id"]).get();
     const customerOrder = await db.collection('userpengguna').doc(snap.data()["customer_id"]).collection('Order').doc(snap.data()["unique_id"]).get();
@@ -595,6 +702,50 @@ async function confirmedMerchantOrder(snap: DocumentSnapshot, context: functions
   await db.runTransaction((transaction) => {
     transaction.update(selectedOrder.ref, confirmedPesananMerchant);
     functions.logger.info("SUKSES KONFIRMASI ORDER MERCHANT: ", selectedOrder.id);
+    return Promise.resolve();
+  })
+}
+
+async function createMessageThreadForDriver(snap: DocumentSnapshot, context: functions.EventContext) {
+  let orderLuckyDriver = db.collection('userdriver').doc(snap.get('idDriver')).collection('messagesOrder').doc(snap.get('orderId')).collection(snap.get('orderId')).doc(snap.id);
+
+  const createFirstMessageForCustomer = {
+    idFrom: snap.get('idFrom'),
+    idTo: snap.get('idTo'),
+    orderId: snap.get('orderId'),
+    timestamp: snap.get('timestamp'),
+    content: snap.get('content'),
+    type: snap.get('type')
+  };
+  
+  await db.runTransaction((transaction) => {
+    // transaction.update(snap.ref, updatePesananAlternative);
+    transaction.set(orderLuckyDriver, createFirstMessageForCustomer);
+    functions.logger.info("DRIVER #1 DAPAT CHAT MASUK: ", createFirstMessageForCustomer.content);
+    return Promise.resolve();
+  })
+}
+
+async function createMessageThreadForCustomer(snap: DocumentSnapshot, context: functions.EventContext) {
+  let currentCustomer = db.collection('userpengguna').doc(snap.get('idCustomer')).collection('messagesOrder').doc(snap.get('orderId')).collection(snap.get('orderId')).doc(snap.id);
+
+  const createFirstMessageForDriver = {
+    idFrom: snap.get('idFrom'),
+    idTo: snap.get('idTo'),
+    orderId: snap.get('orderId'),
+    timestamp: snap.get('timestamp'),
+    content: snap.get('content'),
+    type: snap.get('type')
+  };
+  
+  // currentCustomer.set(createFirstMessageForDriver).then(references => {
+    // functions.logger.info("CUSTOMER #1 DAPAT CHAT MASUK: ", references)
+  // })
+
+  await db.runTransaction((transaction) => {
+    // transaction.update(snap.ref, updatePesananAlternative);
+    transaction.set(currentCustomer, createFirstMessageForDriver);
+    functions.logger.info("CUSTOMER #1 DAPAT CHAT MASUK: ", createFirstMessageForDriver.content);
     return Promise.resolve();
   })
 }
@@ -953,6 +1104,20 @@ export const updateTestFeeOrder = functions.region("asia-southeast2").firestore
   }
 });
 
+export const customerSendMessageToDriver = functions.region("asia-southeast2").firestore.document("/userpengguna/{customerId}/messagesOrder/{orderId}/{collectionOrderId}/{timestampId}").onCreate(async (snapshot, context) => {
+  initialize();
+  await createMessageThreadForDriver(snapshot, context);
+  // await pushMessageToDriver(snapshot, context);
+  functions.logger.info("Customer Nulis Chat dari Timestamp: ", context.params.timestampId);
+});
+
+export const driverSendMessageToCustomer = functions.region("asia-southeast2").firestore.document("/userdriver/{driverId}/messagesOrder/{orderId}/{collectionOrderId}/{timestampId}").onCreate(async (snapshot, context) => {
+  initialize();
+  // await pushMessageToCustomer(snapshot, context);
+  await createMessageThreadForCustomer(snapshot, context);
+  functions.logger.info("Driver Nulis Chat dari Timestamp: ", context.params.timestampId);
+});
+
 export const updateDeliveryFeeOrder = functions.region("asia-southeast2").firestore.document("/userdriver/{driverId}/OrderAntar/{orderId}").onUpdate(async (snapshot, context) => { 
   initialize();
   if (snapshot.after.data()["statusPesanan"] == "DRIVER_SELESAI") {
@@ -1041,10 +1206,16 @@ export const driverUpdateOrder = functions.region("asia-southeast2").firestore
 
 });
 
+export const scheduledMerchantOperationals = functions.region("asia-southeast2").pubsub.schedule('every 1 hours').onRun( async (context) => {
+  initialize();
+
+  functions.logger.info("Check timestamp merchant operationals:", context.timestamp);
+});
+
 export const scheduledMerchantStorage = functions.region("asia-southeast2").pubsub.schedule('every 5 minutes').onRun( async (context) => {
   initialize();
 
-  await checkExceededFiles();
+  
 });
 
 export const testFCMOrderBoard = functions.region('asia-southeast2').https.onRequest(
